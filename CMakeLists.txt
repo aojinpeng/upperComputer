@@ -18,6 +18,7 @@ find_package(Qt5 REQUIRED COMPONENTS
     Network
     Sql
     Charts
+    SerialBus
 )
 
 # 定义全局输出目录（跨平台统一）

@@ -45,6 +45,7 @@ add_executable(ModbusTcpScada
     common/Config.h
     common/Utils.cpp
     common/Utils.h
+    common/Defines.h
 
 )
 
@@ -65,6 +66,7 @@ target_link_libraries(ModbusTcpScada PRIVATE
     Qt5::Network
     Qt5::Sql
     Qt5::Charts
+    Qt5::SerialBus
 )
 
 # 【关键修复：添加配置文件拷贝，写在目标定义之后】

@@ -53,7 +53,7 @@ bool Config::load(const QString &configPath)
 
     m_configRoot = root;
     m_loaded = true;
-    LOG_INFO("Config", "Config file loaded successfully");
+    LOG_INFO("Config", "配置文件加载成功");
     emit configChanged();
     return true;
 }

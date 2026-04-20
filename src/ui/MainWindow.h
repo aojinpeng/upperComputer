@@ -14,8 +14,7 @@ class MainWindow : public QMainWindow
 public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
-protected:
-    void showEvent(QShowEvent *event) override;
+
 
 private:
     Ui::MainWindow *ui;
