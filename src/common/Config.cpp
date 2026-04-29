@@ -1,7 +1,9 @@
- 
 #include "Config.h"
 #include "Logger.h"
 #include <QFile>
+#include <QDir>
+#include <QFileInfo>
+#include <QCoreApplication>
 
 Config& Config::instance()
 {
@@ -9,17 +11,29 @@ Config& Config::instance()
     return instance;
 }
 
-Config::Config(QObject *parent)
-    : QObject(parent),
-    m_loaded(false)
+Config::Config(QObject* parent)
+    : QObject(parent)
+    , m_loaded(false)
 {
-    setDefaultValues(); // 先设置默认值，防止加载失败导致崩溃
+    setDefaultValues();
 }
 
-bool Config::load(const QString &configPath)
+QJsonObject Config::configRoot() const
 {
     QMutexLocker locker(&m_mutex);
-    m_configPath = configPath;
+    return m_configRoot;
+}
+
+bool Config::load(const QString& configPath)
+{
+    QMutexLocker locker(&m_mutex);
+
+    // 如果未传入路径或路径为空，使用默认绝对路径
+    QString path = configPath;
+    if (path.isEmpty()) {
+        path = getDefaultConfigPath();
+    }
+    m_configPath = path;
 
     QFile file(m_configPath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -28,7 +42,6 @@ bool Config::load(const QString &configPath)
         return false;
     }
 
-    // 解析JSON
     QByteArray data = file.readAll();
     file.close();
 
@@ -64,9 +77,9 @@ bool Config::reload()
     return load(m_configPath);
 }
 
-bool Config::validateConfig(const QJsonObject &root) const
+bool Config::validateConfig(const QJsonObject& root) const
 {
-    // 简单校验：检查必需的顶层键
+    // 检查必需的顶级键是否存在
     QStringList requiredKeys = {"mysql", "collect", "devices"};
     for (const QString& key : requiredKeys) {
         if (!root.contains(key)) {
@@ -74,12 +87,104 @@ bool Config::validateConfig(const QJsonObject &root) const
             return false;
         }
     }
+
+    // 检查类型
+    if (!root["mysql"].isObject()) {
+        LOG_ERROR("Config", "Config key 'mysql' must be an object");
+        return false;
+    }
+    if (!root["collect"].isObject()) {
+        LOG_ERROR("Config", "Config key 'collect' must be an object");
+        return false;
+    }
+    if (!root["devices"].isArray()) {
+        LOG_ERROR("Config", "Config key 'devices' must be an array");
+        return false;
+    }
+
+    return true;
+}
+
+bool Config::saveConfig(const QJsonObject& newConfig)
+{
+    QMutexLocker locker(&m_mutex);
+
+    // 0. 确保配置路径有效（若无效则尝试调用 load 默认路径）
+    if (m_configPath.isEmpty()) {
+        QString defaultPath = getDefaultConfigPath();
+        if (!load(defaultPath)) {
+            LOG_ERROR("Config", "Cannot save: no valid config path and failed to load default");
+            return false;
+        }
+    }
+
+    // 1. 验证新配置
+    if (!validateConfig(newConfig)) {
+        LOG_ERROR("Config", "Validation failed for new config");
+        return false;
+    }
+
+    // 2. 确保目录存在
+    QFileInfo fileInfo(m_configPath);
+    QDir dir = fileInfo.absoluteDir();
+    if (!dir.exists()) {
+        if (!dir.mkpath(dir.absolutePath())) {
+            LOG_ERROR("Config", "Failed to create config directory: " + dir.absolutePath());
+            return false;
+        }
+    }
+
+    // 3. 临时文件 & 备份文件
+    QString tempPath = m_configPath + ".tmp";
+    QString backupPath = m_configPath + ".bak";
+
+    // 4. 写入临时文件
+    QFile file(tempPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        LOG_ERROR("Config", "Failed to open temp file: " + tempPath);
+        return false;
+    }
+    QJsonDocument doc(newConfig);
+    file.write(doc.toJson(QJsonDocument::Indented));
+    if (!file.flush()) {
+        file.close();
+        QFile::remove(tempPath);
+        LOG_ERROR("Config", "Flush failed");
+        return false;
+    }
+    file.close();
+
+    // 5. 原子保存：备份 -> 替换 -> 删除备份
+    if (QFile::exists(m_configPath)) {
+        if (!QFile::rename(m_configPath, backupPath)) {
+            LOG_ERROR("Config", "Failed to rename to backup");
+            QFile::remove(tempPath);
+            return false;
+        }
+    }
+    if (!QFile::rename(tempPath, m_configPath)) {
+        LOG_ERROR("Config", "Failed to rename temp to config");
+        if (QFile::exists(backupPath))
+            QFile::rename(backupPath, m_configPath);
+        QFile::remove(tempPath);
+        return false;
+    }
+    QFile::remove(backupPath);
+
+    // 6. 更新内存
+    m_configRoot = newConfig;
+    m_loaded = true;
+
+    // 【关键修复】在锁内发射信号（递归锁允许，避免竞态）
+    // 并确保使用 Qt::QueuedConnection 的连接不会立即销毁发送者
+    emit configChanged();
+
+    LOG_INFO("Config", "Config saved successfully");
     return true;
 }
 
 void Config::setDefaultValues()
 {
-    // MySQL默认配置
     m_configRoot["mysql"] = QJsonObject{
         {"host", "127.0.0.1"},
         {"port", 3306},
@@ -88,18 +193,15 @@ void Config::setDefaultValues()
         {"database", "modbus_scada"}
     };
 
-    // 采集默认配置
     m_configRoot["collect"] = QJsonObject{
-        {"interval_ms", 1000},
+        {"interval_ms", 5000},
         {"heartbeat_ms", 5000},
         {"reconnect_ms", 3000}
     };
 
-    // 空设备列表
     m_configRoot["devices"] = QJsonArray();
 }
 
-// 配置项Get实现（带默认值兜底）
 QString Config::mysqlHost() const
 {
     QMutexLocker locker(&m_mutex);
@@ -133,7 +235,7 @@ QString Config::mysqlDatabase() const
 int Config::collectIntervalMs() const
 {
     QMutexLocker locker(&m_mutex);
-    return m_configRoot["collect"].toObject()["interval_ms"].toInt(1000);
+    return m_configRoot["collect"].toObject()["interval_ms"].toInt(5000);
 }
 
 int Config::heartbeatIntervalMs() const
@@ -145,11 +247,16 @@ int Config::heartbeatIntervalMs() const
 int Config::reconnectIntervalMs() const
 {
     QMutexLocker locker(&m_mutex);
-    return m_configRoot["collect"].toObject()["reconnect_ms"].toInt(3000);
+    return m_configRoot["collect"].toObject()["reconnect_ms"].toInt(5000);
 }
 
 QJsonArray Config::deviceList() const
 {
     QMutexLocker locker(&m_mutex);
     return m_configRoot["devices"].toArray();
+}
+
+QString Config::getDefaultConfigPath()
+{
+    return  QString("%1/config/config.json").arg(PROJECT_SOURCE_DIR);
 }

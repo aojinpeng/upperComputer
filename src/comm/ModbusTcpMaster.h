@@ -45,7 +45,7 @@ private slots:
     void onReadReady();
     void onConnectionTimeout();
 
-private:
+public:
     DeviceInfoPtr m_device;
     QModbusTcpClient* m_modbusClient;
     QTimer* m_connectionTimer; // 连接超时定时器

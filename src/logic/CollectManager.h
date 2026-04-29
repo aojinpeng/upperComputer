@@ -1,4 +1,3 @@
-  
 #ifndef COLLECTMANAGER_H
 #define COLLECTMANAGER_H
 
@@ -6,29 +5,24 @@
 #include <QThread>
 #include <QTimer>
 #include <QMap>
-#include "../common/Defines.h"
-#include "DeviceManager.h"
-#include "../comm/ModbusTcpMaster.h"
-#include "../comm/HeartBeat.h"
+#include <QElapsedTimer>
+#include "ModbusTcpMaster.h"
+#include "HeartBeat.h"
+#include "../logic/DeviceManager.h"
 
 class CollectManager : public QObject
 {
     Q_OBJECT
 public:
     explicit CollectManager(QObject *parent = nullptr);
-    ~CollectManager() override;
+    ~CollectManager();
 
-    // 控制接口（必须在moveToThread之后调用）
     void start();
     void stop();
 
 signals:
-    void sigDataCollected(DataPointPtr dataPoint);
     void sigDeviceStatusChanged(int deviceId, DeviceStatus status);
-
-public slots:
-    // 配置变更槽（用于热加载）
-    void onConfigChanged();
+    void sigDataCollected(DataPointPtr dataPoint);
 
 private slots:
     void onCollectTimer();
@@ -38,6 +32,7 @@ private slots:
     void onReadSuccess(int deviceId, int startAddr, const QVector<quint16>& data);
     void onHeartbeatSuccess(int deviceId);
     void onHeartbeatFailed(int deviceId, const QString& error);
+    void onConfigChanged();
 
 private:
     void initDevices();
@@ -46,9 +41,14 @@ private:
 
     QThread* m_collectThread;
     QTimer* m_collectTimer;
-    QMap<int, ModbusTcpMaster*> m_modbusMasters; // deviceId -> ModbusTcpMaster
-    QMap<int, HeartBeat*> m_heartbeats; // deviceId -> HeartBeat
     bool m_running;
+
+    QMap<int, ModbusTcpMaster*> m_modbusMasters;
+    QMap<int, HeartBeat*> m_heartbeats;
+
+    // 防抖：记录每个设备上次重连尝试的时间（毫秒时间戳）
+    QMap<int, qint64> m_lastReconnectTime;
+    QMap<int, int> m_heartbeatFailCount;  // 心跳连续失败次数
 };
 
 #endif // COLLECTMANAGER_H

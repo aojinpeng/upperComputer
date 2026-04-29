@@ -1,18 +1,16 @@
-# 手动指定所有源码 + 头文件
-add_executable(ModbusTcpScada
-    # 程序入口
-    main.cpp
-
+# ====================== 第一步：创建核心静态库（主程序和测试共用） ======================
+# 把所有业务代码做成静态库ModbusScadaCore
+add_library(ModbusScadaCore STATIC
+    # 【注意】这里只放业务源码，不要放main.cpp
     # ====================== UI 层 ======================
     ui/MainWindow.cpp
     ui/MainWindow.h
     ui/MainWindow.ui
-    ui/AlarmWidget.cpp
-    ui/AlarmWidget.h
+
     ui/ChartWidget.cpp
     ui/ChartWidget.h
-    ui/DevicePanel.cpp
-    ui/DevicePanel.h
+    ui/DevicePanelWidget.cpp
+    ui/DevicePanelWidget.h
 
     # ====================== 业务逻辑层 ======================
     logic/DeviceManager.cpp
@@ -22,12 +20,12 @@ add_executable(ModbusTcpScada
     logic/CollectManager.cpp
     logic/CollectManager.h
 
-    # ====================== 通信层 ======================
+    # ====================== 通信层（包含HttpClient！） ======================
     comm/ModbusTcpMaster.cpp
     comm/ModbusTcpMaster.h
     comm/TcpServer.cpp
     comm/TcpServer.h
-    comm/HttpClient.cpp
+    comm/HttpClient.cpp  # 关键：HttpClient的源码在这里！
     comm/HttpClient.h
     comm/HeartBeat.cpp
     comm/HeartBeat.h
@@ -46,11 +44,19 @@ add_executable(ModbusTcpScada
     common/Utils.cpp
     common/Utils.h
     common/Defines.h
+    common/Defines.cpp
 
+    # ====================== 对话框 ======================
+    ui/LoginDialog.h ui/LoginDialog.cpp ui/LoginDialog.ui
+    ui/ConfigDialog.h ui/ConfigDialog.cpp ui/ConfigDialog.ui
+    ui/AlarmDialog.h ui/AlarmDialog.cpp ui/AlarmDialog.ui
+    ui/DataQueryDialog.h ui/DataQueryDialog.cpp ui/DataQueryDialog.ui
+    ui/SimpleHttpTest.h ui/SimpleHttpTest.cpp
+    ui/DeviceEditDialog.h ui/DeviceEditDialog.cpp
 )
 
-# 包含所有头文件目录
-target_include_directories(ModbusTcpScada PRIVATE
+# 给核心库设置头文件目录
+target_include_directories(ModbusScadaCore PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/logic
@@ -59,8 +65,8 @@ target_include_directories(ModbusTcpScada PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/common
 )
 
-# 链接 Qt5 核心库
-target_link_libraries(ModbusTcpScada PRIVATE
+# 核心库链接Qt模块
+target_link_libraries(ModbusScadaCore PUBLIC
     Qt5::Core
     Qt5::Widgets
     Qt5::Network
@@ -69,7 +75,16 @@ target_link_libraries(ModbusTcpScada PRIVATE
     Qt5::SerialBus
 )
 
-# 【关键修复：添加配置文件拷贝，写在目标定义之后】
+# ====================== 第二步：编译主程序 ======================
+# 主程序只包含main.cpp，其他代码都链接静态库
+add_executable(ModbusTcpScada
+    main.cpp  # 只有main.cpp！
+)
+
+# 主程序链接核心静态库
+target_link_libraries(ModbusTcpScada PRIVATE ModbusScadaCore)
+
+# 拷贝配置文件（和原来一样）
 add_custom_command(TARGET ModbusTcpScada POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/config

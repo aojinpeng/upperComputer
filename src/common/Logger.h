@@ -8,6 +8,7 @@
 #include <QDateTime>
 
 // 日志级别枚举（严禁硬编码数字）
+// 日志分为五种情况
 enum class LogLevel {
     Debug = 0,
     Info = 1,
@@ -16,15 +17,15 @@ enum class LogLevel {
     Fatal = 4
 };
 
+//单列模式
 class Logger : public QObject
 {
     Q_OBJECT
 public:
     // 单例模式（线程安全懒汉式）
     static Logger& instance();
-
     // 禁止拷贝和赋值
-    Logger(const Logger&) = delete;
+    Logger(const Logger&)=delete;
     Logger& operator=(const Logger&) = delete;
 
     // 初始化日志系统（配置日志目录、级别、文件大小限制）
@@ -35,6 +36,8 @@ public:
     // 核心日志接口
     void log(LogLevel level, const QString& module, const QString& message);
 
+
+// 便捷宏定义，是为了快捷使用log
 // 便捷宏定义（在代码中使用 LOG_DEBUG("Module", "Message")）
 #define LOG_DEBUG(module, msg) Logger::instance().log(LogLevel::Debug, module, msg)
 #define LOG_INFO(module, msg) Logger::instance().log(LogLevel::Info, module, msg)

@@ -2,9 +2,8 @@
 #include "Logger.h"
 #include <QDir>
 #include <QCoreApplication>
-// ========== 修复：添加缺失的2个头文件（解决所有报错！） ==========
-#include <QDebug>   // 解决 qDebug/qCritical 报错
-#include <QMap>     // 解决 QMap 容器报错
+#include <QDebug>
+#include <QMap>
 #include <QMutexLocker> // Qt自动锁工具类
 // 单例实现：线程安全的局部静态变量
 Logger& Logger::instance()
@@ -23,6 +22,7 @@ Logger::Logger(QObject *parent)
 
 Logger::~Logger()
 {
+
     QMutexLocker locker(&m_mutex);
     if (m_logFile.isOpen()) {
         m_logStream.flush();
@@ -50,7 +50,7 @@ void Logger::init(const QString &logDir, LogLevel minLevel, qint64 maxFileSize)
     // 初始化日志文件（按日期命名）
     QString logFileName = QString("scada_%1.log").arg(QDateTime::currentDateTime().toString("yyyyMMdd"));
     m_logFile.setFileName(dir.filePath(logFileName));
-
+     qDebug() << "这是文件路径"<< dir.filePath(logFileName);
     // 打开日志文件（Append模式）
     if (m_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         m_logStream.setDevice(&m_logFile);
@@ -105,21 +105,29 @@ QString Logger::levelToString(LogLevel level) const
     return levelMap.value(level, "UNKNOWN");
 }
 
-void Logger::rotateLogFile()
-{
+void Logger::rotateLogFile() {
     if (m_logFile.size() >= m_maxFileSize) {
+        // 1. 关闭当前文件
         m_logStream.flush();
         m_logFile.close();
 
-        // 重命名旧文件（添加时间戳）
-        QString oldFileName = m_logFile.fileName();
-        QString newFileName = oldFileName + "." + QDateTime::currentDateTime().toString("hhmmss");
-        QFile::rename(oldFileName, newFileName);
+        // 2. 重命名旧文件（加序号）
+        QString baseName = m_logFile.fileName().left(m_logFile.fileName().lastIndexOf('.'));
+        QString extension = m_logFile.fileName().mid(m_logFile.fileName().lastIndexOf('.'));
+        QString newFileName = QString("%1_%2%3").arg(baseName).arg(1).arg(extension);
 
-        // 重新打开新日志文件
+        // 如果 scada_20260427_1.log 已存在，就找下一个序号（简单版）
+        int i = 1;
+        while (QFile::exists(newFileName)) {
+            newFileName = QString("%1_%2%3").arg(baseName).arg(++i).arg(extension);
+        }
+        QFile::rename(m_logFile.fileName(), newFileName);
+
+        // 3. 重新打开新文件
+        m_logFile.setFileName(m_logDir + "/scada_" + QDateTime::currentDateTime().toString("yyyyMMdd") + ".log");
         if (m_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
             m_logStream.setDevice(&m_logFile);
-            LOG_INFO("Logger", "Log file rotated");
+            m_logStream.setCodec("UTF-8");
         }
     }
 }

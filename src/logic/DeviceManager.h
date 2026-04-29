@@ -26,6 +26,8 @@ signals:
     void sigDeviceAdded(DeviceInfoPtr device);
     void sigDeviceRemoved(int deviceId);
     void sigDeviceStatusChanged(int deviceId, DeviceStatus status);
+public slots:
+    void onConfigReloaded();
 
 private:
     explicit DeviceManager(QObject *parent = nullptr);

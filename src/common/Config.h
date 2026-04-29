@@ -1,9 +1,8 @@
-  
 #ifndef CONFIG_H
 #define CONFIG_H
 
 #include <QObject>
-#include <QMutex>
+#include <QRecursiveMutex>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -12,44 +11,44 @@ class Config : public QObject
 {
     Q_OBJECT
 public:
-    // 单例模式
     static Config& instance();
     Config(const Config&) = delete;
     Config& operator=(const Config&) = delete;
 
-    // 加载/重载配置文件
+    // 如果 configPath 为空，则使用默认绝对路径（应用程序目录下的 config/config.json）
     bool load(const QString& configPath = "./config/config.json");
-    bool reload(); // 热加载接口
+    bool reload();
+    bool isLoaded() const { QMutexLocker locker(&m_mutex); return m_loaded; }
 
-    // 配置项获取接口（带默认值，避免硬编码）
-    // 数据库配置
+    QJsonObject configRoot() const;
+    bool saveConfig(const QJsonObject& newConfig);
+
+    // 配置项获取接口
     QString mysqlHost() const;
     int mysqlPort() const;
     QString mysqlUser() const;
     QString mysqlPassword() const;
     QString mysqlDatabase() const;
 
-    // 采集配置
     int collectIntervalMs() const;
     int heartbeatIntervalMs() const;
     int reconnectIntervalMs() const;
 
-    // 设备配置（返回JSON数组，业务层解析）
     QJsonArray deviceList() const;
 
 signals:
-    void configChanged(); // 配置变更信号（用于热加载通知业务层）
+    void configChanged();
 
 private:
-    explicit Config(QObject *parent = nullptr);
+    explicit Config(QObject* parent = nullptr);
     ~Config() override = default;
 
-    // 内部辅助函数
     bool validateConfig(const QJsonObject& root) const;
     void setDefaultValues();
+    static QString getDefaultConfigPath();   // 获取应用程序目录下的默认配置路径
 
 private:
-    mutable QMutex m_mutex;
+    mutable QRecursiveMutex m_mutex;
     QString m_configPath;
     QJsonObject m_configRoot;
     bool m_loaded;

@@ -13,7 +13,9 @@ int main(int argc, char *argv[])
     // 设置应用程序信息（用于QSettings等）
     QApplication::setOrganizationName("IndustrialSCADA");
     QApplication::setApplicationName("ModbusTcpScada");
-
+    if (!Config::instance().load()) {
+        qWarning() << "Failed to load config, using defaults";
+    }
     MainWindow w;
     w.show();
     int ret = a.exec();

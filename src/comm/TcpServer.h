@@ -12,6 +12,7 @@ class TcpServer : public QObject
 {
     Q_OBJECT
 public:
+    //explicit禁止强制类型转换
     explicit TcpServer(QObject *parent = nullptr);
     ~TcpServer() override;
 

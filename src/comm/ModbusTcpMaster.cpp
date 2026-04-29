@@ -47,6 +47,37 @@ void ModbusTcpMaster::connectToDevice()
         LOG_ERROR("ModbusTcpMaster", QString("Failed to connect to device %1: %2")
                                          .arg(m_device->deviceName, error));
         emit sigErrorOccurred(error);
+        // 重要：不要立即发射 sigDisconnected，因为 QModbusClient 内部状态可能还未变为 UnconnectedState
+        // 延迟一小段时间后再检查状态，避免同步循环
+        QTimer::singleShot(10, this, [this]() {
+            if (m_modbusClient->state() != QModbusDevice::ConnectedState) {
+                // 此时状态已经稳定，触发断开信号
+                onStateChanged(QModbusDevice::UnconnectedState);
+            }
+        });
+    }
+}
+
+void ModbusTcpMaster::onStateChanged(QModbusDevice::State state)
+{
+    switch (state) {
+    case QModbusDevice::ConnectedState:
+        m_connectionTimer->stop();
+        m_retryCount = 0;
+        m_device->status = DeviceStatus::Online;
+        LOG_INFO("ModbusTcpMaster", QString("Device %1 connected successfully").arg(m_device->deviceName));
+        emit sigConnected();
+        break;
+    case QModbusDevice::UnconnectedState:
+        // 如果当前已经是 Offline 状态且没有 pending 重连，则发射信号
+        if (m_device->status != DeviceStatus::Offline) {
+            m_device->status = DeviceStatus::Offline;
+            LOG_WARNING("ModbusTcpMaster", QString("Device %1 disconnected").arg(m_device->deviceName));
+            emit sigDisconnected();
+        }
+        break;
+    default:
+        break;
     }
 }
 
@@ -147,25 +178,6 @@ void ModbusTcpMaster::writeSingleRegister(int addr, quint16 value)
     }
 }
 
-void ModbusTcpMaster::onStateChanged(QModbusDevice::State state)
-{
-    switch (state) {
-    case QModbusDevice::ConnectedState:
-        m_connectionTimer->stop();
-        m_retryCount = 0;
-        m_device->status = DeviceStatus::Online;
-        LOG_INFO("ModbusTcpMaster", QString("Device %1 connected successfully").arg(m_device->deviceName));
-        emit sigConnected();
-        break;
-    case QModbusDevice::UnconnectedState:
-        m_device->status = DeviceStatus::Offline;
-        LOG_WARNING("ModbusTcpMaster", QString("Device %1 disconnected").arg(m_device->deviceName));
-        emit sigDisconnected();
-        break;
-    default:
-        break;
-    }
-}
 
 void ModbusTcpMaster::onErrorOccurred(QModbusDevice::Error error)
 {

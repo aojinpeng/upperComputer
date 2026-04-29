@@ -19,14 +19,13 @@ find_package(Qt5 REQUIRED COMPONENTS
     Sql
     Charts
     SerialBus
+    Test  # 必须保留，测试用
 )
 
 # 定义全局输出目录（跨平台统一）
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-
-# 添加子目录（先处理src，创建目标）
+add_definitions(-DPROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# 关键：添加子目录（先src，后tests）
 add_subdirectory(src)
-
-# 【删除原来的add_custom_command，移动到src/CMakeLists.txt】

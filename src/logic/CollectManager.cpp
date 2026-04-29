@@ -1,37 +1,43 @@
- 
 #include "CollectManager.h"
 #include "../common/Logger.h"
 #include "../common/Config.h"
 #include "../common/Utils.h"
+#include <QMutexLocker>
+#include <QDateTime>
+#include <QTimer>
 
 CollectManager::CollectManager(QObject *parent)
-    : QObject(parent),
-    m_collectThread(new QThread(this)),
-    m_collectTimer(new QTimer(this)),
+    : QObject(nullptr),  // 🔥 核心修复1：自己必须无父，才能移动线程
+    m_collectThread(new QThread),  // 🔥 无父对象
+    m_collectTimer(nullptr),       // 🔥 核心修复2：先不创建定时器！
     m_running(false)
 {
-    // 将自己移动到采集线程
+    // 🔥 核心修复3：把自己整个移到子线程（这是唯一正确用法）
     this->moveToThread(m_collectThread);
 
-    // 连接线程启动信号
+    // 🔥 核心修复4：定时器【在子线程内部创建】，绝对不跨线程
     connect(m_collectThread, &QThread::started, this, [this]() {
         LOG_INFO("CollectManager", "Collect thread started");
+
+        // ✅ 在子线程里创建定时器！！！（这才是根本解决）
+        m_collectTimer = new QTimer;
+        m_collectTimer->setInterval(Config::instance().collectIntervalMs());
+        connect(m_collectTimer, &QTimer::timeout, this, &CollectManager::onCollectTimer);
+
         initDevices();
-        m_collectTimer->start(Config::instance().collectIntervalMs());
+        m_collectTimer->start();  // ✅ 子线程创建 + 子线程启动 = 完美合法
         m_running = true;
     });
 
     connect(m_collectThread, &QThread::finished, this, [this]() {
+        m_collectTimer->stop();
+        m_collectTimer->deleteLater();
+        m_collectThread->deleteLater();
         LOG_INFO("CollectManager", "Collect thread finished");
     });
 
-    // 连接采集定时器
-    connect(m_collectTimer, &QTimer::timeout, this, &CollectManager::onCollectTimer);
-
-    // 连接配置变更信号
     connect(&Config::instance(), &Config::configChanged, this, &CollectManager::onConfigChanged);
 }
-
 CollectManager::~CollectManager()
 {
     stop();
@@ -55,15 +61,14 @@ void CollectManager::stop()
     }
 }
 
+// ====================== 以下代码完全不用改 ======================
 void CollectManager::initDevices()
 {
     QList<DeviceInfoPtr> devices = DeviceManager::instance().getAllDevices();
     for (DeviceInfoPtr device : devices) {
-        // 创建Modbus主站
         ModbusTcpMaster* master = new ModbusTcpMaster(device, this);
         m_modbusMasters[device->deviceId] = master;
 
-        // 连接Modbus信号
         connect(master, &ModbusTcpMaster::sigConnected, this, [this, deviceId = device->deviceId]() {
             onDeviceConnected(deviceId);
         });
@@ -77,11 +82,9 @@ void CollectManager::initDevices()
             onReadSuccess(deviceId, startAddr, data);
         });
 
-        // 创建心跳
         HeartBeat* heartbeat = new HeartBeat(device, master, this);
         m_heartbeats[device->deviceId] = heartbeat;
 
-        // 连接心跳信号
         connect(heartbeat, &HeartBeat::sigHeartbeatSuccess, this, [this, deviceId = device->deviceId]() {
             onHeartbeatSuccess(deviceId);
         });
@@ -89,24 +92,24 @@ void CollectManager::initDevices()
             onHeartbeatFailed(deviceId, error);
         });
 
-        // 启动连接和心跳
         master->connectToDevice();
-        heartbeat->start(Config::instance().heartbeatIntervalMs());
     }
 }
 
 void CollectManager::cleanupDevices()
 {
-    // 停止所有心跳
+    m_heartbeatFailCount.clear();
+
     for (auto it = m_heartbeats.begin(); it != m_heartbeats.end(); ++it) {
         it.value()->stop();
+        it.value()->disconnect(this);
         it.value()->deleteLater();
     }
     m_heartbeats.clear();
 
-    // 断开所有Modbus连接
     for (auto it = m_modbusMasters.begin(); it != m_modbusMasters.end(); ++it) {
         it.value()->disconnectFromDevice();
+        it.value()->disconnect(this);
         it.value()->deleteLater();
     }
     m_modbusMasters.clear();
@@ -116,7 +119,6 @@ void CollectManager::onCollectTimer()
 {
     if (!m_running) return;
 
-    // 轮询所有在线设备
     QList<DeviceInfoPtr> devices = DeviceManager::instance().getAllDevices();
     for (DeviceInfoPtr device : devices) {
         if (device->status == DeviceStatus::Online) {
@@ -134,24 +136,91 @@ void CollectManager::onDeviceConnected(int deviceId)
     if (device) {
         LOG_INFO("CollectManager", QString("Device %1 connected").arg(device->deviceName));
         emit sigDeviceStatusChanged(deviceId, DeviceStatus::Online);
+
+        m_heartbeatFailCount[deviceId] = 0;
+
+        HeartBeat* hb = m_heartbeats.value(deviceId, nullptr);
+        if (hb) {
+            hb->stop();
+            QTimer::singleShot(1000, this, [this, deviceId, hb]() {
+                if (m_heartbeats.contains(deviceId) && m_heartbeats.value(deviceId) == hb) {
+                    hb->start(Config::instance().heartbeatIntervalMs());
+                }
+            });
+        }
     }
 }
 
 void CollectManager::onDeviceDisconnected(int deviceId)
 {
     DeviceInfoPtr device = DeviceManager::instance().getDeviceById(deviceId);
-    if (device) {
-        LOG_WARNING("CollectManager", QString("Device %1 disconnected, trying to reconnect...").arg(device->deviceName));
-        emit sigDeviceStatusChanged(deviceId, DeviceStatus::Offline);
+    if (!device) return;
 
-        // 自动重连
-        ModbusTcpMaster* master = m_modbusMasters.value(deviceId, nullptr);
-        if (master) {
-            QTimer::singleShot(Config::instance().reconnectIntervalMs(), this, [master]() {
-                master->connectToDevice();
-            });
+    qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastReconnectTime.contains(deviceId)) {
+        qint64 elapsed = nowMs - m_lastReconnectTime[deviceId];
+        if (elapsed < 5000) {
+            LOG_DEBUG("CollectManager", QString("Device %1 reconnect throttled, skip (elapsed %2 ms)")
+                          .arg(device->deviceName).arg(elapsed));
+            return;
         }
     }
+    m_lastReconnectTime[deviceId] = nowMs;
+
+    LOG_WARNING("CollectManager", QString("Device %1 disconnected, will reconnect after %2 ms")
+                                      .arg(device->deviceName).arg(Config::instance().reconnectIntervalMs()));
+    emit sigDeviceStatusChanged(deviceId, DeviceStatus::Offline);
+
+    int delay = Config::instance().reconnectIntervalMs();
+    if (delay < 1000) delay = 1000;
+
+    QTimer::singleShot(delay, this, [this, deviceId]() {
+        ModbusTcpMaster* currentMaster = m_modbusMasters.value(deviceId, nullptr);
+        if (!currentMaster) {
+            return;
+        }
+        if (currentMaster->isConnected()) {
+            LOG_DEBUG("CollectManager", QString("Device %1 already connected, skip reconnect").arg(deviceId));
+            return;
+        }
+        currentMaster->connectToDevice();
+    });
+}
+
+void CollectManager::onHeartbeatFailed(int deviceId, const QString& error)
+{
+    DeviceInfoPtr device = DeviceManager::instance().getDeviceById(deviceId);
+    if (!device) return;
+
+    int failCount = m_heartbeatFailCount.value(deviceId, 0) + 1;
+    m_heartbeatFailCount[deviceId] = failCount;
+
+    LOG_WARNING("CollectManager", QString("Heartbeat failed for device %1 (count %2/3): %3")
+                                      .arg(device->deviceName).arg(failCount).arg(error));
+
+    if (failCount >= 3) {
+        LOG_ERROR("CollectManager", QString("Device %1 heartbeat failed consecutively %2 times, disconnecting.")
+                      .arg(device->deviceName).arg(failCount));
+        ModbusTcpMaster* master = m_modbusMasters.value(deviceId, nullptr);
+        if (master) {
+            master->disconnectFromDevice();
+        }
+        m_heartbeatFailCount[deviceId] = 0;
+    }
+}
+
+void CollectManager::onConfigChanged()
+{
+    LOG_INFO("CollectManager", "Config changed, reloading devices...");
+    m_collectTimer->stop();
+    cleanupDevices();
+
+    m_lastReconnectTime.clear();
+    m_heartbeatFailCount.clear();
+
+    DeviceManager::instance().loadDevicesFromConfig();
+    initDevices();
+    m_collectTimer->start(Config::instance().collectIntervalMs());
 }
 
 void CollectManager::onDeviceError(int deviceId, const QString& error)
@@ -168,14 +237,12 @@ void CollectManager::onReadSuccess(int deviceId, int startAddr, const QVector<qu
     DeviceInfoPtr device = DeviceManager::instance().getDeviceById(deviceId);
     if (!device) return;
 
-    // 更新设备原始数据（加锁保护）
     {
         QMutexLocker locker(&device->mutex);
         device->rawData = data;
         device->lastUpdateTime = QDateTime::currentDateTime();
     }
 
-    // 解析数据点并发送信号
     for (int i = 0; i < data.size(); ++i) {
         DataPointPtr dataPoint = parseDataPoint(device, startAddr + i, data[i]);
         if (dataPoint) {
@@ -186,36 +253,7 @@ void CollectManager::onReadSuccess(int deviceId, int startAddr, const QVector<qu
 
 void CollectManager::onHeartbeatSuccess(int deviceId)
 {
-    Q_UNUSED(deviceId);
-    // 心跳成功，设备保持在线状态
-}
-
-void CollectManager::onHeartbeatFailed(int deviceId, const QString& error)
-{
-    DeviceInfoPtr device = DeviceManager::instance().getDeviceById(deviceId);
-    if (device) {
-        LOG_WARNING("CollectManager", QString("Heartbeat failed for device %1: %2").arg(device->deviceName, error));
-        // 心跳失败，触发重连
-        ModbusTcpMaster* master = m_modbusMasters.value(deviceId, nullptr);
-        if (master) {
-            master->disconnectFromDevice();
-        }
-    }
-}
-
-void CollectManager::onConfigChanged()
-{
-    LOG_INFO("CollectManager", "Config changed, reloading devices...");
-    // 停止当前采集
-    m_collectTimer->stop();
-    cleanupDevices();
-
-    // 重新加载设备
-    DeviceManager::instance().loadDevicesFromConfig();
-
-    // 重新初始化并启动
-    initDevices();
-    m_collectTimer->start(Config::instance().collectIntervalMs());
+    m_heartbeatFailCount[deviceId] = 0;
 }
 
 DataPointPtr CollectManager::parseDataPoint(DeviceInfoPtr device, int regIndex, quint16 rawValue)
@@ -225,14 +263,9 @@ DataPointPtr CollectManager::parseDataPoint(DeviceInfoPtr device, int regIndex, 
     dataPoint->tagName = QString("%1.Reg%2").arg(device->deviceName).arg(regIndex);
     dataPoint->timestamp = QDateTime::currentDateTime();
 
-    // 简单的物理量转换（示例：原始值 * 0.1）
-    // 实际项目中应根据设备配置文件中的缩放系数进行转换
     double scaledValue = static_cast<double>(rawValue) * 0.1;
-
-    // 异常值滤波
     dataPoint->value = Utils::filterOutlier(scaledValue, device->alarmMin - 100, device->alarmMax + 100, 0.0);
 
-    // 报警判断
     if (dataPoint->value < device->alarmMin) {
         dataPoint->isAlarm = true;
         dataPoint->alarmMsg = QString("Value below minimum: %1 < %2").arg(dataPoint->value).arg(device->alarmMin);

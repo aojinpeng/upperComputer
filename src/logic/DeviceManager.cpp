@@ -11,8 +11,16 @@ DeviceManager& DeviceManager::instance()
 DeviceManager::DeviceManager(QObject *parent)
     : QObject(parent)
 {
+    // 关键：连接 Config 的热重载信号
+    connect(&Config::instance(), &Config::configChanged,
+            this, &DeviceManager::onConfigReloaded);
 }
 
+void DeviceManager::onConfigReloaded()
+{
+    LOG_INFO("DeviceManager", "Config reloaded, reloading devices...");
+    loadDevicesFromConfig();   // 重新加载设备列表
+}
 void DeviceManager::loadDevicesFromConfig()
 {
     QMutexLocker locker(&m_mutex);
